@@ -146,3 +146,60 @@ async def startup_event():
     asyncio.create_task(redis_listener())
 if __name__ == "__main__":
  uvicorn.run(app, host="localhost", port=8000)
+
+
+
+
+#  Flow :
+
+#  Redis logs are thrown to a channelwhich has project_id , and redis consumer subscribes to this channel ,
+#  the channel name is known from client when he is connecting to socket
+# The problem is the redis listener is not listening to the channel name , it is listening to all channels .
+# Below is the modfied code
+
+# lu
+
+@app.websocket("/ws/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    await websocket.accept()
+    
+    try:
+        # Initialize client's connections and subscriptions
+        if client_id not in active_connections:
+            active_connections[client_id] = {
+                'websocket': websocket,
+                'subscribed_channels': set()  # Track subscribed channels
+            }
+        
+        async for message in websocket:
+            data = json.loads(message)
+            if data['action'] == 'subscribe':
+                channel = data['channel']
+                # Store channel subscription
+                active_connections[client_id]['subscribed_channels'].add(channel)
+                await websocket.send_json({
+                    "type": "system",
+                    "message": f"Joined {channel}"
+                })
+                
+    finally:
+        if client_id in active_connections:
+            del active_connections[client_id]
+
+# Modified Redis listener
+async def redis_listener():
+    await pubsub.psubscribe('app_logs:*')
+    
+    async for message in pubsub.listen():
+        if message['type'] == 'pmessage':
+            channel = message['channel']
+            # Only send to clients subscribed to this channel
+            for client_id, client_data in active_connections.items():
+                if channel in client_data['subscribed_channels']:
+                    try:
+                        await client_data['websocket'].send_json({
+                            "channel": channel,
+                            "data": message['data']
+                        })
+                    except Exception as e:
+                        print(f"Error sending to client {client_id}: {e}")
